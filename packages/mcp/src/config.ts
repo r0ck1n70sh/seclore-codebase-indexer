@@ -1,0 +1,349 @@
+import { envManager } from "@zilliz/claude-context-core";
+
+export interface ContextMcpConfig {
+    name: string;
+    version: string;
+    // Transport configuration
+    transport: 'stdio' | 'http';
+    httpHost: string;
+    httpPort: number;
+    // When true, the HTTP transport runs statelessly: no mcp-session-id is
+    // required and each request is self-contained. This is restart-safe and
+    // avoids client "reconnect" failures at the cost of server-initiated
+    // streaming. Set MCP_HTTP_STATELESS=false to use stateful sessions instead.
+    httpStateless: boolean;
+    // Embedding provider configuration
+    embeddingProvider: 'OpenAI' | 'VoyageAI' | 'Gemini' | 'Ollama' | 'OpenRouter';
+    embeddingModel: string;
+    // Provider-specific API keys
+    openaiApiKey?: string;
+    openaiBaseUrl?: string;
+    voyageaiApiKey?: string;
+    geminiApiKey?: string;
+    geminiBaseUrl?: string;
+    // OpenRouter configuration
+    openrouterApiKey?: string;
+    // Ollama configuration
+    ollamaModel?: string;
+    ollamaHost?: string;
+    ollamaDimension?: number;
+    // Vector database configuration
+    vectorDatabaseProvider: 'Milvus' | 'Chroma';
+    milvusAddress?: string; // Optional, can be auto-resolved from token
+    milvusToken?: string;
+    // Chroma configuration
+    chromaAddress?: string;
+    chromaToken?: string;
+    chromaTenant?: string;
+    chromaDatabase?: string;
+    collectionNameOverride?: string;
+}
+
+// Legacy format (v1) - for backward compatibility
+export interface CodebaseSnapshotV1 {
+    indexedCodebases: string[];
+    indexingCodebases: string[] | Record<string, number>;  // Array (legacy) or Map of codebase path to progress percentage
+    lastUpdated: string;
+}
+
+// New format (v2) - structured with codebase information
+
+export type RequestSplitterType = 'ast' | 'langchain';
+
+// Request-level indexing options stored with a codebase's snapshot entry.
+export interface CodebaseIndexOptions {
+    requestSplitter?: RequestSplitterType;
+    requestCustomExtensions?: string[];
+    requestIgnorePatterns?: string[];
+}
+
+// Base interface for common fields
+interface CodebaseInfoBase extends CodebaseIndexOptions {
+    lastUpdated: string;
+}
+
+// Indexing state - when indexing is in progress
+export interface CodebaseInfoIndexing extends CodebaseInfoBase {
+    status: 'indexing';
+    indexingPercentage: number;  // Current progress percentage
+}
+
+// Indexed state - when indexing completed successfully
+export interface CodebaseInfoIndexed extends CodebaseInfoBase {
+    status: 'indexed';
+    indexedFiles: number;        // Number of files indexed
+    totalChunks: number;         // Total number of chunks generated
+    indexStatus: 'completed' | 'limit_reached';  // Status from indexing result
+}
+
+// Index failed state - when indexing failed
+export interface CodebaseInfoIndexFailed extends CodebaseInfoBase {
+    status: 'indexfailed';
+    errorMessage: string;        // Error message from the failure
+    lastAttemptedPercentage?: number;  // Progress when failure occurred
+}
+
+// Union type for all codebase information states
+export type CodebaseInfo = CodebaseInfoIndexing | CodebaseInfoIndexed | CodebaseInfoIndexFailed;
+
+export interface CodebaseSnapshotV2 {
+    formatVersion: 'v2';
+    codebases: Record<string, CodebaseInfo>;  // codebasePath -> CodebaseInfo
+    lastUpdated: string;
+}
+
+// Union type for all supported formats
+export type CodebaseSnapshot = CodebaseSnapshotV1 | CodebaseSnapshotV2;
+
+// Helper function to get default model for each provider
+export function getDefaultModelForProvider(provider: string): string {
+    switch (provider) {
+        case 'OpenAI':
+            return 'text-embedding-3-small';
+        case 'VoyageAI':
+            return 'voyage-code-3';
+        case 'Gemini':
+            return 'gemini-embedding-001';
+        case 'OpenRouter':
+            return 'openai/text-embedding-3-small';
+        case 'Ollama':
+            return 'nomic-embed-text';
+        default:
+            return 'text-embedding-3-small';
+    }
+}
+
+// Helper function to get embedding model with provider-specific environment variable priority
+export function getEmbeddingModelForProvider(provider: string): string {
+    switch (provider) {
+        case 'Ollama':
+            // For Ollama, prioritize OLLAMA_MODEL over EMBEDDING_MODEL for backward compatibility
+            const ollamaModel = envManager.get('OLLAMA_MODEL') || envManager.get('EMBEDDING_MODEL') || getDefaultModelForProvider(provider);
+            console.log(`[DEBUG] 🎯 Ollama model selection: OLLAMA_MODEL=${envManager.get('OLLAMA_MODEL') || 'NOT SET'}, EMBEDDING_MODEL=${envManager.get('EMBEDDING_MODEL') || 'NOT SET'}, selected=${ollamaModel}`);
+            return ollamaModel;
+        case 'OpenAI':
+        case 'VoyageAI':
+        case 'Gemini':
+        case 'OpenRouter':
+        default:
+            // For all other providers, use EMBEDDING_MODEL or default
+            const selectedModel = envManager.get('EMBEDDING_MODEL') || getDefaultModelForProvider(provider);
+            console.log(`[DEBUG] 🎯 ${provider} model selection: EMBEDDING_MODEL=${envManager.get('EMBEDDING_MODEL') || 'NOT SET'}, selected=${selectedModel}`);
+            return selectedModel;
+    }
+}
+
+function getPositiveIntegerFromEnv(name: string): number | undefined {
+    const rawValue = envManager.get(name);
+    if (!rawValue) {
+        return undefined;
+    }
+
+    const parsedValue = Number(rawValue);
+    if (Number.isInteger(parsedValue) && parsedValue > 0) {
+        return parsedValue;
+    }
+
+    console.warn(`[DEBUG] ⚠️  Ignoring invalid ${name}: ${rawValue}. Expected a positive integer.`);
+    return undefined;
+}
+
+export function createMcpConfig(): ContextMcpConfig {
+    // Debug: Print all environment variables related to Context
+    console.log(`[DEBUG] 🔍 Environment Variables Debug:`);
+    console.log(`[DEBUG]   EMBEDDING_PROVIDER: ${envManager.get('EMBEDDING_PROVIDER') || 'NOT SET'}`);
+    console.log(`[DEBUG]   EMBEDDING_MODEL: ${envManager.get('EMBEDDING_MODEL') || 'NOT SET'}`);
+    console.log(`[DEBUG]   EMBEDDING_DIMENSION: ${envManager.get('EMBEDDING_DIMENSION') || 'NOT SET'}`);
+    console.log(`[DEBUG]   OLLAMA_MODEL: ${envManager.get('OLLAMA_MODEL') || 'NOT SET'}`);
+    console.log(`[DEBUG]   GEMINI_API_KEY: ${envManager.get('GEMINI_API_KEY') ? 'SET (length: ' + envManager.get('GEMINI_API_KEY')!.length + ')' : 'NOT SET'}`);
+    console.log(`[DEBUG]   OPENAI_API_KEY: ${envManager.get('OPENAI_API_KEY') ? 'SET (length: ' + envManager.get('OPENAI_API_KEY')!.length + ')' : 'NOT SET'}`);
+    console.log(`[DEBUG]   VECTOR_DATABASE: ${envManager.get('VECTOR_DATABASE') || 'NOT SET (default: Milvus)'}`);
+    console.log(`[DEBUG]   MILVUS_ADDRESS: ${envManager.get('MILVUS_ADDRESS') || 'NOT SET'}`);
+    console.log(`[DEBUG]   CHROMA_ADDRESS: ${envManager.get('CHROMA_ADDRESS') || 'NOT SET'}`);
+    console.log(`[DEBUG]   CODE_CHUNKS_COLLECTION_NAME_OVERRIDE: ${envManager.get('CODE_CHUNKS_COLLECTION_NAME_OVERRIDE') || 'NOT SET'}`);
+    console.log(`[DEBUG]   NODE_ENV: ${envManager.get('NODE_ENV') || 'NOT SET'}`);
+
+    const config: ContextMcpConfig = {
+        name: envManager.get('MCP_SERVER_NAME') || "Context MCP Server",
+        version: envManager.get('MCP_SERVER_VERSION') || "1.0.0",
+        // Transport configuration (stdio for local subprocess, http for remote multi-client access)
+        transport: (envManager.get('MCP_TRANSPORT') as 'stdio' | 'http') || 'stdio',
+        httpHost: envManager.get('MCP_HTTP_HOST') || '0.0.0.0',
+        httpPort: getPositiveIntegerFromEnv('MCP_HTTP_PORT') || 3000,
+        // Defaults to stateless (restart-safe, no session handshake). Opt out with MCP_HTTP_STATELESS=false.
+        httpStateless: (envManager.get('MCP_HTTP_STATELESS') || 'true').toLowerCase() !== 'false',
+        // Embedding provider configuration
+        embeddingProvider: (envManager.get('EMBEDDING_PROVIDER') as 'OpenAI' | 'VoyageAI' | 'Gemini' | 'Ollama' | 'OpenRouter') || 'OpenAI',
+        embeddingModel: getEmbeddingModelForProvider(envManager.get('EMBEDDING_PROVIDER') || 'OpenAI'),
+        // Provider-specific API keys
+        openaiApiKey: envManager.get('OPENAI_API_KEY'),
+        openaiBaseUrl: envManager.get('OPENAI_BASE_URL'),
+        voyageaiApiKey: envManager.get('VOYAGEAI_API_KEY'),
+        geminiApiKey: envManager.get('GEMINI_API_KEY'),
+        geminiBaseUrl: envManager.get('GEMINI_BASE_URL'),
+        // OpenRouter configuration
+        openrouterApiKey: envManager.get('OPENROUTER_API_KEY'),
+        // Ollama configuration
+        ollamaModel: envManager.get('OLLAMA_MODEL'),
+        ollamaHost: envManager.get('OLLAMA_HOST'),
+        ollamaDimension: getPositiveIntegerFromEnv('EMBEDDING_DIMENSION'),
+        // Vector database provider selection (defaults to Milvus for backward compatibility)
+        vectorDatabaseProvider: (envManager.get('VECTOR_DATABASE') as 'Milvus' | 'Chroma') || 'Milvus',
+        // Vector database configuration - address can be auto-resolved from token
+        milvusAddress: envManager.get('MILVUS_ADDRESS'), // Optional, can be resolved from token
+        milvusToken: envManager.get('MILVUS_TOKEN'),
+        // Chroma configuration
+        chromaAddress: envManager.get('CHROMA_ADDRESS') || 'http://localhost:8000',
+        chromaToken: envManager.get('CHROMA_TOKEN'),
+        chromaTenant: envManager.get('CHROMA_TENANT'),
+        chromaDatabase: envManager.get('CHROMA_DATABASE'),
+        collectionNameOverride: envManager.get('CODE_CHUNKS_COLLECTION_NAME_OVERRIDE')
+    };
+
+    return config;
+}
+
+export function logConfigurationSummary(config: ContextMcpConfig): void {
+    // Log configuration summary before starting server
+    console.log(`[MCP] 🚀 Starting Context MCP Server`);
+    console.log(`[MCP] Configuration Summary:`);
+    console.log(`[MCP]   Server: ${config.name} v${config.version}`);
+    console.log(`[MCP]   Embedding Provider: ${config.embeddingProvider}`);
+    console.log(`[MCP]   Embedding Model: ${config.embeddingModel}`);
+    console.log(`[MCP]   Vector Database Provider: ${config.vectorDatabaseProvider}`);
+    if (config.vectorDatabaseProvider === 'Chroma') {
+        console.log(`[MCP]   Chroma Address: ${config.chromaAddress || '[Not configured]'}`);
+        console.log(`[MCP]   Chroma Tenant: ${config.chromaTenant || 'default_tenant'}`);
+        console.log(`[MCP]   Chroma Database: ${config.chromaDatabase || 'default_database'}`);
+    } else {
+        console.log(`[MCP]   Milvus Address: ${config.milvusAddress || (config.milvusToken ? '[Auto-resolve from token]' : '[Not configured]')}`);
+    }
+    if (config.collectionNameOverride) {
+        console.log(`[MCP]   Collection Name Override: ✅ Configured`);
+    }
+
+    // Log provider-specific configuration without exposing sensitive data
+    switch (config.embeddingProvider) {
+        case 'OpenAI':
+            console.log(`[MCP]   OpenAI API Key: ${config.openaiApiKey ? '✅ Configured' : '❌ Missing'}`);
+            if (config.openaiBaseUrl) {
+                console.log(`[MCP]   OpenAI Base URL: ${config.openaiBaseUrl}`);
+            }
+            break;
+        case 'VoyageAI':
+            console.log(`[MCP]   VoyageAI API Key: ${config.voyageaiApiKey ? '✅ Configured' : '❌ Missing'}`);
+            break;
+        case 'Gemini':
+            console.log(`[MCP]   Gemini API Key: ${config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
+            if (config.geminiBaseUrl) {
+                console.log(`[MCP]   Gemini Base URL: ${config.geminiBaseUrl}`);
+            }
+            break;
+        case 'OpenRouter':
+            console.log(`[MCP]   OpenRouter API Key: ${config.openrouterApiKey ? '✅ Configured' : '❌ Missing'}`);
+            break;
+        case 'Ollama':
+            console.log(`[MCP]   Ollama Host: ${config.ollamaHost || 'http://127.0.0.1:11434'}`);
+            console.log(`[MCP]   Ollama Model: ${config.embeddingModel}`);
+            if (config.ollamaDimension) {
+                console.log(`[MCP]   Ollama Embedding Dimension: ${config.ollamaDimension}`);
+            }
+            break;
+    }
+
+    console.log(`[MCP] 🔧 Initializing server components...`);
+}
+
+export function showHelpMessage(): void {
+    console.log(`
+Context MCP Server
+
+Usage: npx @zilliz/claude-context-mcp@latest [options]
+
+Options:
+  --help, -h                          Show this help message
+
+Environment Variables:
+  MCP_SERVER_NAME         Server name
+  MCP_SERVER_VERSION      Server version
+  
+  Embedding Provider Configuration:
+  EMBEDDING_PROVIDER      Embedding provider: OpenAI, VoyageAI, Gemini, Ollama, OpenRouter (default: OpenAI)
+  EMBEDDING_MODEL         Embedding model name (works for all providers)
+  EMBEDDING_DIMENSION     Optional embedding dimension override for Ollama
+  
+  Provider-specific API Keys:
+  OPENAI_API_KEY          OpenAI API key (required for OpenAI provider)
+  OPENAI_BASE_URL         OpenAI API base URL (optional, for custom endpoints)
+  VOYAGEAI_API_KEY        VoyageAI API key (required for VoyageAI provider)
+  GEMINI_API_KEY          Google AI API key (required for Gemini provider)
+  GEMINI_BASE_URL         Gemini API base URL (optional, for custom endpoints)
+  OPENROUTER_API_KEY      OpenRouter API key (required for OpenRouter provider)
+
+  Ollama Configuration:
+  OLLAMA_HOST             Ollama server host (default: http://127.0.0.1:11434)
+  OLLAMA_MODEL            Ollama model name (alternative to EMBEDDING_MODEL for Ollama)
+  
+  Vector Database Configuration:
+  VECTOR_DATABASE         Vector database provider: Milvus, Chroma (default: Milvus)
+  MILVUS_ADDRESS          Milvus address (optional, can be auto-resolved from token)
+  MILVUS_TOKEN            Milvus token (optional, used for authentication and address resolution)
+  CHROMA_ADDRESS          ChromaDB server address (default: http://localhost:8000)
+  CHROMA_TOKEN            ChromaDB auth token / API key (optional)
+  CHROMA_TENANT           ChromaDB tenant (default: default_tenant)
+  CHROMA_DATABASE         ChromaDB database (default: default_database)
+  CODE_CHUNKS_COLLECTION_NAME_OVERRIDE
+                          Optional readable prefix for collection names.
+                          Uses code_chunks_<override>_<pathHash> (or hybrid_...)
+                          after sanitization (letters/digits/underscore, 255 chars max).
+                          The per-codebase pathHash is preserved so multiple
+                          codebases stay distinct under the same override.
+
+  MCP Sync Configuration:
+  CLAUDE_CONTEXT_BACKGROUND_SYNC
+                          Enable/disable startup + periodic background sync
+                          for indexed codebases (default: true). Set to false
+                          to disable polling while keeping trigger-based sync.
+  CLAUDE_CONTEXT_SYNC_INTERVAL_MS
+                          Background sync interval in milliseconds when enabled
+                          (default: 300000).
+
+  Sync Trigger Watcher:
+  CLAUDE_CONTEXT_TRIGGER_WATCHER
+                          Enable/disable the ~/.context/.sync-trigger filesystem
+                          watcher (default: true). When enabled, touching the
+                          trigger file kicks off an immediate, debounced re-index.
+                          Triggered syncs share the same global cross-process
+                          lock as background sync, so multi-instance setups stay
+                          coordinated. Set to false to disable filesystem
+                          watching entirely (read-only / sandboxed environments).
+
+Examples:
+  # Start MCP server with OpenAI (default) and explicit Milvus address
+  OPENAI_API_KEY=sk-xxx MILVUS_ADDRESS=localhost:19530 npx @zilliz/claude-context-mcp@latest
+  
+  # Start MCP server with OpenAI and specific model
+  OPENAI_API_KEY=sk-xxx EMBEDDING_MODEL=text-embedding-3-large MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+  
+  # Start MCP server with VoyageAI and specific model
+  EMBEDDING_PROVIDER=VoyageAI VOYAGEAI_API_KEY=pa-xxx EMBEDDING_MODEL=voyage-3-large MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+  
+  # Start MCP server with Gemini and specific model
+  EMBEDDING_PROVIDER=Gemini GEMINI_API_KEY=xxx EMBEDDING_MODEL=gemini-embedding-001 MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+  
+  # Start MCP server with Ollama and specific model (using OLLAMA_MODEL)
+  EMBEDDING_PROVIDER=Ollama OLLAMA_MODEL=mxbai-embed-large MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+  
+  # Start MCP server with Ollama and specific model (using EMBEDDING_MODEL)
+  EMBEDDING_PROVIDER=Ollama EMBEDDING_MODEL=nomic-embed-text MILVUS_TOKEN=your-token npx @zilliz/claude-context-mcp@latest
+
+  # Start MCP server with ChromaDB as the vector database backend
+  OPENAI_API_KEY=sk-xxx VECTOR_DATABASE=Chroma CHROMA_ADDRESS=http://localhost:8000 npx @zilliz/claude-context-mcp@latest
+
+  # Start MCP server with a human-readable collection name override
+  OPENAI_API_KEY=sk-xxx MILVUS_TOKEN=your-token CODE_CHUNKS_COLLECTION_NAME_OVERRIDE=my_project npx @zilliz/claude-context-mcp@latest
+
+  # Start MCP server with background sync enabled every minute
+  OPENAI_API_KEY=sk-xxx MILVUS_TOKEN=your-token CLAUDE_CONTEXT_BACKGROUND_SYNC=true CLAUDE_CONTEXT_SYNC_INTERVAL_MS=60000 npx @zilliz/claude-context-mcp@latest
+        `);
+}
