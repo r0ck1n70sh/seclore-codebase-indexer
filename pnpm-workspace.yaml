@@ -1,0 +1,25 @@
+packages:
+  - packages/*
+  - examples/*
+
+allowBuilds:
+  '@vscode/vsce-sign': true
+  esbuild: true
+  faiss-node: true
+  keytar: true
+  protobufjs: true
+  tree-sitter: true
+  tree-sitter-c-sharp: true
+  tree-sitter-cli: true
+  tree-sitter-cpp: true
+  tree-sitter-go: true
+  tree-sitter-java: true
+  tree-sitter-javascript: true
+  tree-sitter-python: true
+  tree-sitter-rust: true
+  tree-sitter-scala: true
+  tree-sitter-typescript: true
+  unrs-resolver: true
+
+ignoredBuiltDependencies:
+  - faiss-node
